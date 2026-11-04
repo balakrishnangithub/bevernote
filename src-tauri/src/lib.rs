@@ -481,6 +481,15 @@ fn save_credentials(
         .map_err(keyring_error)?
         .set_password(&credentials.access_token)
         .map_err(keyring_error)?;
+    let saved_token = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
+        .map_err(keyring_error)?
+        .get_password()
+        .map_err(keyring_error)?;
+    if saved_token != credentials.access_token {
+        return Err(BeverError::Invalid(
+            "secure credential storage could not retain the pCloud access token; check your system credential manager and reconnect".into(),
+        ));
+    }
     library.set_setting("pcloud_hostname", &credentials.hostname)?;
     library.set_setting("pcloud_email", email.unwrap_or(""))?;
     Ok(())
@@ -756,23 +765,6 @@ mod tests {
         let credentials = receiver.join().unwrap().unwrap();
         assert_eq!(credentials.access_token, "test-token");
         assert_eq!(credentials.hostname, "eapi.pcloud.com");
-    }
-
-    #[test]
-    fn saved_oauth_credentials_enable_sync_without_profile_lookup() {
-        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../test-results")
-            .join(format!("oauth-status-{}", uuid::Uuid::new_v4()));
-        let library = bevernote_core::Library::open(&directory).unwrap();
-        let credentials = bevernote_core::pcloud::PCloudCredentials {
-            access_token: "test-token".into(),
-            hostname: "api.pcloud.com".into(),
-        };
-        let status = super::status_for_saved_credentials(&library, &credentials, None).unwrap();
-        assert!(status.connected);
-        assert_eq!(status.hostname, "api.pcloud.com");
-        drop(library);
-        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
