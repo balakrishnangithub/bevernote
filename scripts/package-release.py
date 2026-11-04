@@ -10,7 +10,7 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASE = ROOT / "release"
-SOURCE_PREFIX = "Bevernote-0.1.0-source"
+SOURCE_PREFIX = "Bevernote-0.1.1-source"
 ROOT_FILES = {
     ".gitattributes",
     ".gitignore",
@@ -43,9 +43,9 @@ EXCLUDED_DIRECTORIES = {
     "test-results",
 }
 ARTIFACTS = {
-    ROOT / "target/release/bundle/nsis/Bevernote_0.1.0_x64-setup.exe": "Bevernote_0.1.0_x64-setup.exe",
-    ROOT / "target/release/bundle/msi/Bevernote_0.1.0_x64_en-US.msi": "Bevernote_0.1.0_x64_en-US.msi",
-    ROOT / "src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk": "Bevernote_0.1.0_arm64-debug.apk",
+    ROOT / "target/release/bundle/nsis/Bevernote_0.1.1_x64-setup.exe": "Bevernote_0.1.1_x64-setup.exe",
+    ROOT / "target/release/bundle/msi/Bevernote_0.1.1_x64_en-US.msi": "Bevernote_0.1.1_x64_en-US.msi",
+    ROOT / "src-tauri/gen/android/app/build/outputs/apk/arm64/debug/app-arm64-debug.apk": "Bevernote_0.1.1_arm64-debug.apk",
 }
 
 
