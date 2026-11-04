@@ -1,0 +1,6 @@
+# Keep generated assets byte-for-byte intact.
+*.png binary
+*.ico binary
+*.icns binary
+*.onnx binary
+public/demo-attachments/demo-pdf binary

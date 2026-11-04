@@ -1,0 +1,33 @@
+# Dependencies and builds
+*.tsbuildinfo
+tools/rustup-init.exe
+node_modules/
+dist/
+target/
+src-tauri/target/
+# Regenerate machine-specific Android projects with npm run android:init
+src-tauri/gen/
+
+# Local handoff archives and binaries
+release/
+
+# Private local material; never commit credentials or personal exports
+reference/
+test-data/
+*.enex
+*.local.json
+*.local.properties
+.env
+.env.*
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# Test output
+coverage/
+playwright-report/
+test-results/
