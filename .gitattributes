@@ -1,3 +1,6 @@
+# Keep source formatting consistent on Windows and Unix runners.
+* text=auto eol=lf
+
 # Keep generated assets byte-for-byte intact.
 *.png binary
 *.ico binary

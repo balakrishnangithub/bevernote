@@ -381,10 +381,7 @@ fn pcloud_status_inner(library: &Library) -> BeverResult<PCloudStatus> {
         .setting("pcloud_hostname")?
         .unwrap_or_else(|| "api.pcloud.com".to_owned());
     Ok(PCloudStatus {
-        connected: keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-            .map_err(keyring_error)?
-            .get_password()
-            .is_ok(),
+        connected: read_access_token()?.is_some(),
         email: library.setting("pcloud_email")?,
         last_sync_at: library
             .setting("last_sync_at")?
@@ -418,14 +415,10 @@ async fn connect_pcloud(app: AppHandle) -> Result<PCloudStatus, String> {
     .and_then(string_error)?;
     let library = Arc::clone(&app.state::<AppState>().library);
     let status = tauri::async_runtime::spawn_blocking(move || {
-        let client = PCloudClient::new(credentials.clone())?;
-        let email = client.user_email().map_err(|error| {
-            BeverError::Remote(format!(
-                "pCloud authorization was received, but account validation failed: {error}"
-            ))
-        })?;
-        save_credentials(&library, &credentials, email.as_deref())?;
-        pcloud_status_inner(&library)
+        // The OAuth provider has already authorized this token. Do not make
+        // connection completion depend on an optional profile/network request.
+        save_credentials(&library, &credentials, None)?;
+        status_for_saved_credentials(&library, &credentials, None)
     })
     .await
     .map_err(|error| error.to_string())
@@ -452,7 +445,7 @@ async fn connect_pcloud_token(
     tauri::async_runtime::spawn_blocking(move || {
         let email = client.user_email()?;
         save_credentials(&library, &credentials, email.as_deref())?;
-        pcloud_status_inner(&library)
+        status_for_saved_credentials(&library, &credentials, email)
     })
     .await
     .map_err(|error| error.to_string())
@@ -479,6 +472,11 @@ fn save_credentials(
     email: Option<&str>,
 ) -> BeverResult<()> {
     credentials.api_base()?;
+    if credentials.access_token.trim().is_empty() {
+        return Err(BeverError::Invalid(
+            "pCloud returned an empty access token".into(),
+        ));
+    }
     keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
         .map_err(keyring_error)?
         .set_password(&credentials.access_token)
@@ -488,11 +486,33 @@ fn save_credentials(
     Ok(())
 }
 
+fn status_for_saved_credentials(
+    library: &Library,
+    credentials: &PCloudCredentials,
+    email: Option<String>,
+) -> BeverResult<PCloudStatus> {
+    Ok(PCloudStatus {
+        connected: true,
+        email,
+        hostname: credentials.hostname.clone(),
+        last_sync_at: library
+            .setting("last_sync_at")?
+            .and_then(|value| value.parse().ok()),
+    })
+}
+
+fn read_access_token() -> BeverResult<Option<String>> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(keyring_error)?;
+    match entry.get_password() {
+        Ok(token) if !token.trim().is_empty() => Ok(Some(token)),
+        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(keyring_error(error)),
+    }
+}
+
 fn load_credentials(library: &Library) -> BeverResult<PCloudCredentials> {
-    let access_token = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(keyring_error)?
-        .get_password()
-        .map_err(|_| BeverError::Invalid("connect pCloud before synchronizing".into()))?;
+    let access_token = read_access_token()?
+        .ok_or_else(|| BeverError::Invalid("connect pCloud before synchronizing".into()))?;
     let hostname = library
         .setting("pcloud_hostname")?
         .unwrap_or_else(|| "api.pcloud.com".to_owned());
@@ -714,6 +734,45 @@ mod tests {
         assert!(parse_loopback_credentials(&parameters, "different-state").is_err());
         parameters.insert("hostname".into(), "example.com".into());
         assert!(parse_loopback_credentials(&parameters, "expected-state").is_err());
+    }
+
+    #[test]
+    fn oauth_loopback_callback_returns_credentials_without_profile_lookup() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let address = server.server_addr().to_string();
+        let receiver = std::thread::spawn(move || {
+            super::receive_loopback_credentials(server, "expected-state")
+        });
+        let body = "access_token=test-token&state=expected-state&hostname=eapi.pcloud.com";
+        let request = format!(
+            "POST /callback HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        std::io::Write::write_all(&mut stream, request.as_bytes()).unwrap();
+        let mut response = String::new();
+        std::io::Read::read_to_string(&mut stream, &mut response).unwrap();
+        assert!(response.contains("pCloud authorization received"));
+        let credentials = receiver.join().unwrap().unwrap();
+        assert_eq!(credentials.access_token, "test-token");
+        assert_eq!(credentials.hostname, "eapi.pcloud.com");
+    }
+
+    #[test]
+    fn saved_oauth_credentials_enable_sync_without_profile_lookup() {
+        let directory = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../test-results")
+            .join(format!("oauth-status-{}", uuid::Uuid::new_v4()));
+        let library = bevernote_core::Library::open(&directory).unwrap();
+        let credentials = bevernote_core::pcloud::PCloudCredentials {
+            access_token: "test-token".into(),
+            hostname: "api.pcloud.com".into(),
+        };
+        let status = super::status_for_saved_credentials(&library, &credentials, None).unwrap();
+        assert!(status.connected);
+        assert_eq!(status.hostname, "api.pcloud.com");
+        drop(library);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
