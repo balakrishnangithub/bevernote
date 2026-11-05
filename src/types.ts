@@ -168,6 +168,19 @@ export interface PCloudStatus {
   email: string | null;
   hostname: string;
   lastSyncAt: number | null;
+  authorizationPending: boolean;
+}
+
+export interface SyncProgress {
+  phase: string;
+  message: string;
+  current: number;
+  total: number;
+  elapsedMs: number;
+  networkMs: number;
+  remoteRequests: number;
+  bytesUploaded: number;
+  bytesDownloaded: number;
 }
 
 export interface SyncReport {
@@ -177,4 +190,9 @@ export interface SyncReport {
   blobsUploaded: number;
   blobsDownloaded: number;
   syncedAt: number;
+  durationMs: number;
+  networkMs: number;
+  remoteRequests: number;
+  bytesUploaded: number;
+  bytesDownloaded: number;
 }

@@ -1,41 +1,47 @@
+#[cfg(target_os = "android")]
+mod android_oauth;
+mod credentials;
+
+#[cfg(not(target_os = "android"))]
+use std::time::Duration;
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
+#[cfg(not(target_os = "android"))]
+use bevernote_core::pcloud::DEFAULT_REDIRECT_URI;
 use bevernote_core::{
     enex::{export_enex, import_enex_with_progress},
     error::{BeverError, Result as BeverResult},
     models::{
         ImportProgress, ImportReport, LibrarySnapshot, Note, NoteFilter, NoteSummary, SaveNote,
-        SyncReport,
+        SyncProgress, SyncReport,
     },
-    pcloud::{PCloudClient, PCloudCredentials, DEFAULT_CLIENT_ID, DEFAULT_REDIRECT_URI},
-    sync::sync_with_pcloud,
+    pcloud::{PCloudClient, PCloudCredentials, DEFAULT_CLIENT_ID},
+    sync::sync_with_pcloud_progress,
     Library,
 };
+use credentials::{delete_access_token, read_access_token, save_access_token};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
-const KEYRING_SERVICE: &str = "app.bevernote.desktop";
-const KEYRING_ACCOUNT: &str = "pcloud";
-
-struct AppState {
-    library: Arc<Library>,
+pub(crate) struct AppState {
+    pub(crate) library: Arc<Library>,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct PCloudStatus {
+pub(crate) struct PCloudStatus {
     connected: bool,
     email: Option<String>,
     hostname: String,
     last_sync_at: Option<i64>,
+    authorization_pending: bool,
 }
 
 fn string_error<T>(result: bevernote_core::Result<T>) -> Result<T, String> {
@@ -359,12 +365,13 @@ fn save_attachment(
 }
 
 #[tauri::command]
-async fn sync_now(state: State<'_, AppState>) -> Result<SyncReport, String> {
+async fn sync_now(app: AppHandle, state: State<'_, AppState>) -> Result<SyncReport, String> {
     let library = Arc::clone(&state.library);
     tauri::async_runtime::spawn_blocking(move || {
         let credentials = load_credentials(&library)?;
-        let report = sync_with_pcloud(&library, credentials)?;
-        Ok(report)
+        sync_with_pcloud_progress(&library, credentials, |progress: SyncProgress| {
+            let _ = app.emit("bevernote:sync-progress", progress);
+        })
     })
     .await
     .map_err(|error| error.to_string())
@@ -376,7 +383,7 @@ async fn pcloud_status(state: State<'_, AppState>) -> Result<PCloudStatus, Strin
     string_error(pcloud_status_inner(&state.library))
 }
 
-fn pcloud_status_inner(library: &Library) -> BeverResult<PCloudStatus> {
+pub(crate) fn pcloud_status_inner(library: &Library) -> BeverResult<PCloudStatus> {
     let hostname = library
         .setting("pcloud_hostname")?
         .unwrap_or_else(|| "api.pcloud.com".to_owned());
@@ -387,23 +394,32 @@ fn pcloud_status_inner(library: &Library) -> BeverResult<PCloudStatus> {
             .setting("last_sync_at")?
             .and_then(|value| value.parse().ok()),
         hostname,
+        authorization_pending: library
+            .setting("pcloud_oauth_state")?
+            .is_some_and(|state| !state.is_empty()),
     })
 }
 
-#[tauri::command]
-async fn connect_pcloud(app: AppHandle) -> Result<PCloudStatus, String> {
-    let server = tiny_http::Server::http("127.0.0.1:53682").map_err(|error| {
-        format!("cannot start OAuth loopback listener; close other Bevernote connection attempts and retry: {error}")
-    })?;
-    let expected_state = uuid::Uuid::new_v4().to_string();
+pub(crate) fn pcloud_authorization_url(expected_state: &str, redirect_uri: &str) -> Url {
     let mut authorization = Url::parse("https://my.pcloud.com/oauth2/authorize")
         .expect("valid pCloud authorization URL");
     authorization
         .query_pairs_mut()
         .append_pair("client_id", DEFAULT_CLIENT_ID)
         .append_pair("response_type", "token")
-        .append_pair("redirect_uri", DEFAULT_REDIRECT_URI)
-        .append_pair("state", &expected_state);
+        .append_pair("redirect_uri", redirect_uri)
+        .append_pair("state", expected_state);
+    authorization
+}
+
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+async fn connect_pcloud(app: AppHandle) -> Result<PCloudStatus, String> {
+    let server = tiny_http::Server::http("127.0.0.1:53682").map_err(|error| {
+        format!("cannot start OAuth loopback listener; close other Bevernote connection attempts and retry: {error}")
+    })?;
+    let expected_state = uuid::Uuid::new_v4().to_string();
+    let authorization = pcloud_authorization_url(&expected_state, DEFAULT_REDIRECT_URI);
     app.opener()
         .open_url(authorization.as_str(), None::<&str>)
         .map_err(|error| error.to_string())?;
@@ -425,6 +441,13 @@ async fn connect_pcloud(app: AppHandle) -> Result<PCloudStatus, String> {
     .and_then(string_error)?;
     let _ = app.emit("bevernote:pcloud-status", &status);
     Ok(status)
+}
+
+#[cfg(target_os = "android")]
+#[tauri::command]
+async fn connect_pcloud(app: AppHandle) -> Result<PCloudStatus, String> {
+    let library = Arc::clone(&app.state::<AppState>().library);
+    string_error(android_oauth::begin(&app, &library))
 }
 
 #[tauri::command]
@@ -458,15 +481,13 @@ async fn disconnect_pcloud(state: State<'_, AppState>) -> Result<PCloudStatus, S
 }
 
 fn disconnect_pcloud_inner(library: &Library) -> BeverResult<PCloudStatus> {
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(keyring_error)?
-        .delete_credential()
-        .map_err(keyring_error)?;
+    delete_access_token()?;
     library.set_setting("pcloud_email", "")?;
+    library.set_setting("pcloud_oauth_state", "")?;
     pcloud_status_inner(library)
 }
 
-fn save_credentials(
+pub(crate) fn save_credentials(
     library: &Library,
     credentials: &PCloudCredentials,
     email: Option<&str>,
@@ -477,25 +498,19 @@ fn save_credentials(
             "pCloud returned an empty access token".into(),
         ));
     }
-    keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(keyring_error)?
-        .set_password(&credentials.access_token)
-        .map_err(keyring_error)?;
-    let saved_token = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)
-        .map_err(keyring_error)?
-        .get_password()
-        .map_err(keyring_error)?;
-    if saved_token != credentials.access_token {
+    save_access_token(&credentials.access_token)?;
+    if read_access_token()?.as_deref() != Some(credentials.access_token.as_str()) {
         return Err(BeverError::Invalid(
             "secure credential storage could not retain the pCloud access token; check your system credential manager and reconnect".into(),
         ));
     }
     library.set_setting("pcloud_hostname", &credentials.hostname)?;
     library.set_setting("pcloud_email", email.unwrap_or(""))?;
+    library.set_setting("pcloud_oauth_state", "")?;
     Ok(())
 }
 
-fn status_for_saved_credentials(
+pub(crate) fn status_for_saved_credentials(
     library: &Library,
     credentials: &PCloudCredentials,
     email: Option<String>,
@@ -507,16 +522,8 @@ fn status_for_saved_credentials(
         last_sync_at: library
             .setting("last_sync_at")?
             .and_then(|value| value.parse().ok()),
+        authorization_pending: false,
     })
-}
-
-fn read_access_token() -> BeverResult<Option<String>> {
-    let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(keyring_error)?;
-    match entry.get_password() {
-        Ok(token) if !token.trim().is_empty() => Ok(Some(token)),
-        Ok(_) | Err(keyring::Error::NoEntry) => Ok(None),
-        Err(error) => Err(keyring_error(error)),
-    }
 }
 
 fn load_credentials(library: &Library) -> BeverResult<PCloudCredentials> {
@@ -531,10 +538,25 @@ fn load_credentials(library: &Library) -> BeverResult<PCloudCredentials> {
     })
 }
 
-fn keyring_error(error: keyring::Error) -> BeverError {
-    BeverError::Invalid(format!("secure credential storage: {error}"))
+#[cfg(any(target_os = "android", test))]
+pub(crate) fn pcloud_callback_parameters(
+    url: &Url,
+) -> BeverResult<std::collections::HashMap<String, String>> {
+    if url.scheme() != "bevernote" || url.host_str() != Some("oauth") || url.path() != "/pcloud" {
+        return Err(BeverError::Invalid(
+            "unexpected pCloud callback destination".into(),
+        ));
+    }
+    let mut parameters = url
+        .query_pairs()
+        .into_owned()
+        .collect::<std::collections::HashMap<_, _>>();
+    parameters
+        .extend(url::form_urlencoded::parse(url.fragment().unwrap_or("").as_bytes()).into_owned());
+    Ok(parameters)
 }
 
+#[cfg(not(target_os = "android"))]
 fn receive_loopback_credentials(
     server: tiny_http::Server,
     expected_state: &str,
@@ -636,9 +658,13 @@ fn parse_loopback_credentials(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(tauri_plugin_deep_link::init());
+
+    builder
         .register_uri_scheme_protocol("bever", |context, request| {
             let state = context.app_handle().state::<AppState>();
             let reference = request.uri().path().trim_matches('/').to_owned();
@@ -676,6 +702,8 @@ pub fn run() {
             let data_dir = app.path().app_data_dir()?;
             let library = Arc::new(Library::open(data_dir)?);
             app.manage(AppState { library });
+            #[cfg(target_os = "android")]
+            android_oauth::register(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -714,7 +742,10 @@ pub fn run() {
 mod tests {
     use std::collections::HashMap;
 
-    use super::{parse_loopback_credentials, safe_attachment_name};
+    use super::{
+        parse_loopback_credentials, pcloud_authorization_url, pcloud_callback_parameters,
+        safe_attachment_name,
+    };
 
     fn callback_parameters() -> HashMap<String, String> {
         HashMap::from([
@@ -742,6 +773,63 @@ mod tests {
         let mut parameters = callback_parameters();
         assert!(parse_loopback_credentials(&parameters, "different-state").is_err());
         parameters.insert("hostname".into(), "example.com".into());
+        assert!(parse_loopback_credentials(&parameters, "expected-state").is_err());
+    }
+
+    #[test]
+    fn oauth_authorization_url_carries_the_mobile_redirect_and_state() {
+        let authorization = pcloud_authorization_url(
+            "expected-state",
+            bevernote_core::pcloud::MOBILE_REDIRECT_URI,
+        );
+        let parameters = authorization
+            .query_pairs()
+            .into_owned()
+            .collect::<HashMap<_, _>>();
+        assert_eq!(
+            parameters.get("response_type").map(String::as_str),
+            Some("token")
+        );
+        assert_eq!(
+            parameters.get("redirect_uri").map(String::as_str),
+            Some("bevernote://oauth/pcloud")
+        );
+        assert_eq!(
+            parameters.get("state").map(String::as_str),
+            Some("expected-state")
+        );
+        assert_eq!(
+            parameters.get("client_id").map(String::as_str),
+            Some(bevernote_core::pcloud::DEFAULT_CLIENT_ID)
+        );
+    }
+
+    #[test]
+    fn android_callback_reads_fragment_credentials_and_region() {
+        let url = url::Url::parse(
+            "bevernote://oauth/pcloud#access_token=test-token&state=expected-state&hostname=eapi.pcloud.com",
+        )
+        .unwrap();
+        let parameters = pcloud_callback_parameters(&url).unwrap();
+        let credentials = parse_loopback_credentials(&parameters, "expected-state").unwrap();
+        assert_eq!(credentials.access_token, "test-token");
+        assert_eq!(credentials.hostname, "eapi.pcloud.com");
+    }
+
+    #[test]
+    fn android_callback_rejects_wrong_destinations_and_state() {
+        for callback in [
+            "bevernote://not-oauth/pcloud#access_token=test-token&state=expected-state",
+            "bevernote://oauth/not-pcloud#access_token=test-token&state=expected-state",
+            "https://oauth/pcloud#access_token=test-token&state=expected-state",
+        ] {
+            let url = url::Url::parse(callback).unwrap();
+            assert!(pcloud_callback_parameters(&url).is_err());
+        }
+        let url =
+            url::Url::parse("bevernote://oauth/pcloud#access_token=test-token&state=wrong-state")
+                .unwrap();
+        let parameters = pcloud_callback_parameters(&url).unwrap();
         assert!(parse_loopback_credentials(&parameters, "expected-state").is_err());
     }
 

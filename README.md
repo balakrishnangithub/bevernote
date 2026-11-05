@@ -104,11 +104,13 @@ Encrypted Evernote `en-crypt` blocks are preserved and displayed as encrypted bl
 ## Optional pCloud synchronization
 
 1. Create or open a pCloud OAuth application. The bundled public client identifier is for the application details supplied during development; no client secret is included or needed for implicit token flow.
-2. Configure the loopback redirect URI `http://127.0.0.1:53682/` and **enable implicit grant (token flow)** in the pCloud application console. The OAuth fragment is handled only by a loopback page on your computer.
+2. Configure both redirect URIs `http://127.0.0.1:53682/` (Windows/desktop) and `bevernote://oauth/pcloud` (Android), then **enable implicit grant (token flow)** and save the pCloud application settings. Android returns directly to the native app and never connects to a desktop loopback server.
 3. Open **Settings & sync → Connect with browser**, or use the manual access-token option with the correct Global/Europe API region.
-4. Choose **Sync now**. Bevernote creates `/Bevernote/items`, `/Bevernote/blobs`, and `/Bevernote/metadata.json` in your pCloud account.
+4. Choose **Sync now**. Bevernote creates `/Bevernote/items`, `/Bevernote/blobs`, and `/Bevernote/metadata.json` in your pCloud account. The current operation, elapsed/network time, request count, and transferred bytes are visible while sync runs.
 
-Tokens are kept in the OS credential vault, not the notes database. Bevernote communicates only with approved pCloud HTTPS hosts. The remote copy is **not end-to-end encrypted**; pCloud can access the uploaded content. Sync is explicit/manual, not a background service.
+Tokens are kept in the OS credential vault, not the notes database; Android uses Keystore-backed encrypted preferences. Bevernote communicates only with approved pCloud HTTPS hosts. The remote copy is **not end-to-end encrypted**; pCloud can access the uploaded content. Sync is explicit/manual, not a background service.
+
+A remote revision index lets subsequent syncs skip unchanged-note downloads. The first sync after upgrading from 0.1.2 rebuilds this index and still downloads the remote note envelopes once.
 
 Concurrent edits produce a local conflict copy rather than silently discarding the local version. Metadata merging is currently additive for shortcuts and last-updated-wins for notebooks, stacks, and tags; metadata deletion propagation and unattended/background synchronization are not yet implemented. Do not use sync as your only backup.
 

@@ -1,15 +1,15 @@
 import { mkdir } from 'node:fs/promises';
 import { chromium, expect } from '@playwright/test';
-import { createServer } from 'vite';
+import { preview } from 'vite';
 
-const server = await createServer({
-  cacheDir: 'test-results/vite-cache',
-  server: { host: '127.0.0.1', port: 7100, strictPort: true },
+// Exercise the same production bundle embedded in the native applications.
+// This also avoids development-only dependency optimizer stalls on Windows.
+const server = await preview({
+  preview: { host: '127.0.0.1', port: 7100, strictPort: true },
 });
 let browser;
 const errors = [];
 try {
-  await server.listen();
   browser = await chromium.launch({ channel: 'msedge', headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 920 }, deviceScaleFactor: 1 });
   page.on('pageerror', (error) => errors.push(error.message));

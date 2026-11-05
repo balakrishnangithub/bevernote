@@ -217,4 +217,23 @@ pub struct SyncReport {
     pub blobs_uploaded: u64,
     pub blobs_downloaded: u64,
     pub synced_at: i64,
+    pub duration_ms: u64,
+    pub network_ms: u64,
+    pub remote_requests: u64,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncProgress {
+    pub phase: String,
+    pub message: String,
+    pub current: u64,
+    pub total: u64,
+    pub elapsed_ms: u64,
+    pub network_ms: u64,
+    pub remote_requests: u64,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
 }

@@ -1807,10 +1807,43 @@ kbd {
   background: var(--panel-strong);
   font-size: 11px;
 }
+.sync-progress {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid var(--soft-line);
+  border-radius: 7px;
+  background: var(--panel-strong);
+}
+.sync-progress strong {
+  font-size: 11px;
+  line-height: 1.45;
+}
+.sync-progress progress {
+  width: 100%;
+  height: 6px;
+  border: 0;
+  border-radius: 999px;
+  accent-color: var(--accent);
+  overflow: hidden;
+}
+.sync-progress-timing {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 6px 14px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
 .sync-message {
   margin-top: 10px !important;
   padding: 8px;
   border-radius: 6px;
+}
+.sync-message p {
+  margin: 5px 0 0 !important;
 }
 .sync-message.error {
   background: color-mix(in srgb, var(--danger) 9%, transparent);

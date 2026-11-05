@@ -499,7 +499,7 @@ pub fn export_enex(library: &Library, notes: &[Note], destination: impl AsRef<Pa
     writer.write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE en-export SYSTEM \"http://xml.evernote.com/pub/evernote-export4.dtd\">\n")?;
     write!(
         writer,
-        "<en-export export-date=\"{}\" application=\"Bevernote\" version=\"0.1.2\">",
+        "<en-export export-date=\"{}\" application=\"Bevernote\" version=\"0.1.3\">",
         format_enex_date(Utc::now().timestamp_millis())
     )?;
     for note in notes {

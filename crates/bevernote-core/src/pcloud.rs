@@ -1,7 +1,11 @@
 //! Small, synchronous pCloud HTTP JSON adapter used only during explicit sync.
-use std::{collections::BTreeMap, time::Duration};
+use std::{
+    cell::Cell,
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
-use reqwest::blocking::{multipart, Client};
+use reqwest::blocking::{multipart, Client, RequestBuilder};
 use serde_json::Value;
 
 use crate::error::{BeverError, Result};
@@ -29,18 +33,36 @@ pub struct RemoteFile {
     pub size: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PCloudMetrics {
+    pub network_ms: u64,
+    pub remote_requests: u64,
+    pub bytes_uploaded: u64,
+    pub bytes_downloaded: u64,
+}
+
 pub struct PCloudClient {
     credentials: PCloudCredentials,
     http: Client,
+    metrics: Cell<PCloudMetrics>,
 }
 
 impl PCloudClient {
     pub fn new(credentials: PCloudCredentials) -> Result<Self> {
         let http = Client::builder()
+            .connect_timeout(Duration::from_secs(20))
             .timeout(Duration::from_secs(120))
             .user_agent("Bevernote/0.1")
             .build()?;
-        Ok(Self { credentials, http })
+        Ok(Self {
+            credentials,
+            http,
+            metrics: Cell::new(PCloudMetrics::default()),
+        })
+    }
+
+    pub fn metrics(&self) -> PCloudMetrics {
+        self.metrics.get()
     }
 
     pub fn initialize(&self) -> Result<()> {
@@ -88,12 +110,7 @@ impl PCloudClient {
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| BeverError::Remote("pCloud returned no download path".into()))?;
-        let response = self
-            .http
-            .get(format!("https://{host}{remote_path}"))
-            .send()?
-            .error_for_status()?;
-        Ok(response.bytes()?.to_vec())
+        self.send(self.http.get(format!("https://{host}{remote_path}")), 0)
     }
 
     pub fn upload(&self, path: &str, bytes: Vec<u8>) -> Result<()> {
@@ -101,7 +118,8 @@ impl PCloudClient {
             .rsplit_once('/')
             .ok_or_else(|| BeverError::Invalid("invalid remote file path".into()))?;
         let directory = if directory.is_empty() { "/" } else { directory };
-        let response = self
+        let uploaded_bytes = bytes.len() as u64;
+        let request = self
             .http
             .post(format!("{}/uploadfile", self.credentials.api_base()?))
             .query(&[
@@ -118,10 +136,8 @@ impl PCloudClient {
                         .file_name(filename.to_owned())
                         .mime_str("application/octet-stream")?,
                 ),
-            )
-            .send()?
-            .error_for_status()?;
-        let value: Value = response.json()?;
+            );
+        let value: Value = serde_json::from_slice(&self.send(request, uploaded_bytes)?)?;
         check_result(value).map(|_| ())
     }
 
@@ -137,13 +153,24 @@ impl PCloudClient {
         let mut owned = BTreeMap::new();
         owned.insert("access_token", self.credentials.access_token.as_str());
         owned.extend(parameters.iter().copied());
-        let response = self
+        let request = self
             .http
             .get(format!("{}/{method}", self.credentials.api_base()?))
-            .query(&owned)
-            .send()?
-            .error_for_status()?;
-        check_result(response.json()?)
+            .query(&owned);
+        check_result(serde_json::from_slice(&self.send(request, 0)?)?)
+    }
+
+    fn send(&self, request: RequestBuilder, uploaded_bytes: u64) -> Result<Vec<u8>> {
+        let started = Instant::now();
+        let bytes = request.send()?.error_for_status()?.bytes()?;
+        let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let mut metrics = self.metrics.get();
+        metrics.remote_requests = metrics.remote_requests.saturating_add(1);
+        metrics.network_ms = metrics.network_ms.saturating_add(elapsed_ms);
+        metrics.bytes_uploaded = metrics.bytes_uploaded.saturating_add(uploaded_bytes);
+        metrics.bytes_downloaded = metrics.bytes_downloaded.saturating_add(bytes.len() as u64);
+        self.metrics.set(metrics);
+        Ok(bytes.to_vec())
     }
 }
 
@@ -161,6 +188,7 @@ fn check_result(value: Value) -> Result<Value> {
 
 pub const DEFAULT_CLIENT_ID: &str = "B0DEaAnitD8";
 pub const DEFAULT_REDIRECT_URI: &str = "http://127.0.0.1:53682/";
+pub const MOBILE_REDIRECT_URI: &str = "bevernote://oauth/pcloud";
 
 #[cfg(test)]
 mod tests {
@@ -178,5 +206,15 @@ mod tests {
             hostname: "example.com".into(),
         };
         assert!(invalid.api_base().is_err());
+    }
+
+    #[test]
+    fn request_metrics_start_at_zero_without_network_access() {
+        let client = PCloudClient::new(PCloudCredentials {
+            access_token: "test-token".into(),
+            hostname: "api.pcloud.com".into(),
+        })
+        .unwrap();
+        assert_eq!(client.metrics(), PCloudMetrics::default());
     }
 }

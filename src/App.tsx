@@ -6,8 +6,11 @@ import { NoteList } from './components/NoteList';
 import { NoteWorkspace } from './components/NoteWorkspace';
 import { Sidebar } from './components/Sidebar';
 import { api, isNative } from './lib/api';
+import { formatBytes, formatDuration } from './lib/syncProgress';
 import { useLibraryStore } from './store/useLibraryStore';
-import type { PCloudStatus, SyncReport } from './types';
+import type { PCloudStatus, SyncProgress, SyncReport } from './types';
+
+const isAndroid = isNative && /Android/i.test(navigator.userAgent);
 
 export function App() {
   const { initialize, createNote, error, clearError, loading, selectedNote } = useLibraryStore();
@@ -95,6 +98,10 @@ function SettingsDialog({
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [report, setReport] = useState<SyncReport | null>(null);
+  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
+  const [progressReceivedAt, setProgressReceivedAt] = useState(0);
+  const [now, setNow] = useState(0);
+  const [oauthPending, setOauthPending] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [token, setToken] = useState('');
   const [hostname, setHostname] = useState('api.pcloud.com');
@@ -103,7 +110,10 @@ function SettingsDialog({
   useEffect(() => {
     void api
       .pcloudStatus()
-      .then(setStatus)
+      .then((current) => {
+        setStatus(current);
+        setOauthPending(current.authorizationPending);
+      })
       .catch((error: unknown) => setMessage(String(error)));
     if (!isNative) return;
     void api
@@ -115,40 +125,76 @@ function SettingsDialog({
   useEffect(() => {
     if (!isNative) return;
     let active = true;
-    const subscription = listen<PCloudStatus>('bevernote:pcloud-status', (event) => {
-      if (!active) return;
-      setStatus(event.payload);
-      setToken('');
-      setManualOpen(false);
-      setMessage(null);
-    });
+    const subscriptions = [
+      listen<PCloudStatus>('bevernote:pcloud-status', (event) => {
+        if (!active) return;
+        setStatus(event.payload);
+        setOauthPending(event.payload.authorizationPending);
+        setToken('');
+        setManualOpen(false);
+        setMessage(null);
+      }),
+      listen<string>('bevernote:pcloud-error', (event) => {
+        if (!active) return;
+        setOauthPending(false);
+        setMessage(event.payload);
+      }),
+      listen<SyncProgress>('bevernote:sync-progress', (event) => {
+        if (!active) return;
+        setSyncProgress(event.payload);
+        setProgressReceivedAt(Date.now());
+        setNow(Date.now());
+      }),
+    ];
     return () => {
       active = false;
-      void subscription.then((unlisten) => unlisten());
+      void Promise.all(subscriptions).then((unlisteners) => {
+        unlisteners.forEach((unlisten) => unlisten());
+      });
     };
   }, []);
+
+  useEffect(() => {
+    if (busy !== 'sync') return;
+    const timer = window.setInterval(() => setNow(Date.now()), 500);
+    return () => window.clearInterval(timer);
+  }, [busy]);
 
   const run = async (action: string, operation: () => Promise<PCloudStatus | SyncReport>) => {
     setBusy(action);
     setMessage(null);
     setReport(null);
+    if (action === 'sync') {
+      setSyncProgress(null);
+      setNow(Date.now());
+    }
+    if (action === 'connect' && isAndroid) setOauthPending(true);
     try {
       const result = await operation();
       if ('connected' in result) {
         setStatus(result);
+        setOauthPending(result.authorizationPending);
         setToken('');
         setManualOpen(false);
+        if (action === 'connect' && isAndroid && result.authorizationPending) {
+          setMessage('Approve pCloud in your browser. Android will return to Bevernote automatically.');
+        }
       } else {
         setReport(result);
         setStatus(await api.pcloudStatus());
         await Promise.all([refreshNotes(), refreshSnapshot()]);
       }
     } catch (error) {
+      if (action === 'connect') setOauthPending(false);
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(null);
     }
   };
+
+  const elapsedMs = syncProgress
+    ? syncProgress.elapsedMs + (busy === 'sync' ? Math.max(0, now - progressReceivedAt) : 0)
+    : 0;
 
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
@@ -230,7 +276,11 @@ function SettingsDialog({
               </p>
               {!status?.connected && (
                 <span className="settings-pending">
-                  {status === null ? 'Checking pCloud connection…' : 'Connect pCloud to enable sync.'}
+                  {status === null
+                    ? 'Checking pCloud connection…'
+                    : oauthPending
+                      ? 'Waiting for pCloud authorization in your browser…'
+                      : 'Connect pCloud to enable sync.'}
                 </span>
               )}
               <div className="settings-buttons sync-primary-actions">
@@ -274,9 +324,16 @@ function SettingsDialog({
                         Set <strong>Allow implicit grant</strong> to <strong>Allow</strong>, then click{' '}
                         <strong>Save changes</strong>.
                       </li>
-                      <li>
-                        Keep the redirect URI exactly <code>http://127.0.0.1:53682/</code>.
-                      </li>
+                      {isAndroid ? (
+                        <li>
+                          Add <code>bevernote://oauth/pcloud</code> to <strong>Redirect URIs</strong> and save
+                          changes. Keep the existing desktop redirect as well.
+                        </li>
+                      ) : (
+                        <li>
+                          Keep the redirect URI exactly <code>http://127.0.0.1:53682/</code>.
+                        </li>
+                      )}
                       <li>
                         Connect below and approve in the browser. pCloud returns the token and region
                         automatically.
@@ -289,7 +346,11 @@ function SettingsDialog({
                       disabled={!isNative || busy !== null}
                       onClick={() => void run('connect', api.connectPcloud)}
                     >
-                      {busy === 'connect' ? 'Waiting for pCloud…' : 'Connect with browser'}
+                      {busy === 'connect'
+                        ? 'Opening browser…'
+                        : oauthPending
+                          ? 'Restart browser connection'
+                          : 'Connect with browser'}
                     </button>
                     <button
                       className="secondary-action"
@@ -343,16 +404,51 @@ function SettingsDialog({
               {!isNative && (
                 <span className="settings-pending">pCloud connection is available in the native app.</span>
               )}
+              {busy === 'sync' && (
+                <div className="sync-progress" role="status" aria-live="polite">
+                  <strong>{syncProgress?.message ?? 'Preparing synchronization…'}</strong>
+                  {syncProgress && (
+                    <>
+                      {syncProgress.total > 0 && (
+                        <progress
+                          aria-label="Current sync operation"
+                          max={syncProgress.total}
+                          value={Math.min(syncProgress.current, syncProgress.total)}
+                        />
+                      )}
+                      <div className="sync-progress-timing">
+                        <span>Elapsed {formatDuration(elapsedMs)}</span>
+                        <span>Network {formatDuration(syncProgress.networkMs)}</span>
+                      </div>
+                      <span className="settings-pending">
+                        {syncProgress.remoteRequests} pCloud requests · ↓{' '}
+                        {formatBytes(syncProgress.bytesDownloaded)} · ↑{' '}
+                        {formatBytes(syncProgress.bytesUploaded)}
+                      </span>
+                    </>
+                  )}
+                </div>
+              )}
               {message && (
-                <p className="sync-message error" role="alert">
+                <p
+                  className={`sync-message ${oauthPending ? '' : 'error'}`}
+                  role={oauthPending ? 'status' : 'alert'}
+                >
                   {message}
                 </p>
               )}
               {report && (
-                <p className="sync-message success" role="status">
-                  Sync complete: {report.pushed} uploaded, {report.pulled} downloaded, {report.conflicts}{' '}
-                  conflict copies, {report.blobsUploaded + report.blobsDownloaded} attachments transferred.
-                </p>
+                <div className="sync-message success" role="status">
+                  <strong>Sync complete in {formatDuration(report.durationMs)}</strong>
+                  <p>
+                    {report.pushed} notes uploaded, {report.pulled} downloaded, {report.conflicts} conflict
+                    copies, {report.blobsUploaded + report.blobsDownloaded} attachments transferred.
+                  </p>
+                  <span className="settings-pending">
+                    Network {formatDuration(report.networkMs)} · {report.remoteRequests} requests · ↓{' '}
+                    {formatBytes(report.bytesDownloaded)} · ↑ {formatBytes(report.bytesUploaded)}
+                  </span>
+                </div>
               )}
             </div>
           </section>

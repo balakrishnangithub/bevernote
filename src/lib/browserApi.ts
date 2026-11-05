@@ -368,8 +368,19 @@ export const browserApi: BevernoteApi = {
     blobsUploaded: 0,
     blobsDownloaded: 0,
     syncedAt: Date.now(),
+    durationMs: 0,
+    networkMs: 0,
+    remoteRequests: 0,
+    bytesUploaded: 0,
+    bytesDownloaded: 0,
   })),
-  pcloudStatus: demo(() => ({ connected: false, email: null, hostname: 'api.pcloud.com', lastSyncAt: null })),
+  pcloudStatus: demo(() => ({
+    connected: false,
+    email: null,
+    hostname: 'api.pcloud.com',
+    lastSyncAt: null,
+    authorizationPending: false,
+  })),
   connectPcloud: demo(() => {
     throw new Error('pCloud connection requires the native Bevernote app.');
   }),
@@ -381,5 +392,6 @@ export const browserApi: BevernoteApi = {
     email: null,
     hostname: 'api.pcloud.com',
     lastSyncAt: null,
+    authorizationPending: false,
   })),
 };
