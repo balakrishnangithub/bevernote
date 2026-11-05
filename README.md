@@ -104,11 +104,11 @@ Encrypted Evernote `en-crypt` blocks are preserved and displayed as encrypted bl
 ## Optional pCloud synchronization
 
 1. Create or open a pCloud OAuth application. The bundled public client identifier is for the application details supplied during development; no client secret is included or needed for implicit token flow.
-2. Configure both redirect URIs `http://127.0.0.1:53682/` (Windows/desktop) and `bevernote://oauth/pcloud` (Android), then **enable implicit grant (token flow)** and save the pCloud application settings. Android returns directly to the native app and never connects to a desktop loopback server.
+2. Configure `http://127.0.0.1:53682/` for Windows/desktop, then **enable implicit grant (token flow)** and save the pCloud application settings. Do not add the Android `bevernote://oauth/pcloud` callback to the console; the native deep link is handled automatically by the working Android flow and never connects to a desktop loopback server.
 3. Open **Settings & sync → Connect with browser**, or use the manual access-token option with the correct Global/Europe API region.
 4. Choose **Sync now**. Bevernote creates `/Bevernote/items`, `/Bevernote/blobs`, and `/Bevernote/metadata.json` in your pCloud account. The current operation, elapsed/network time, request count, and transferred bytes are visible while sync runs.
 
-Tokens are kept in the OS credential vault, not the notes database; Android uses Keystore-backed encrypted preferences. Bevernote communicates only with approved pCloud HTTPS hosts. The remote copy is **not end-to-end encrypted**; pCloud can access the uploaded content. Sync is explicit/manual, not a background service.
+Tokens are kept in the OS credential vault, not the notes database; Android uses Keystore-backed encrypted preferences. Bevernote communicates only with approved pCloud HTTPS hosts. The remote copy is **not end-to-end encrypted**; pCloud can access the uploaded content. Sync is explicitly initiated, never scheduled. One native worker runs app-wide; its progress remains visible outside Settings. Closing the Windows window during sync hides Bevernote to the tray until the worker finishes, and Android uses a data-sync foreground service with notification progress when permission allows. Background completion is best-effort: force-stop, reboot, OS process termination, Android 14+ data-sync time limits, and OEM battery policies can interrupt it.
 
 A remote revision index lets subsequent syncs skip unchanged-note downloads. The first sync after upgrading from 0.1.2 rebuilds this index and still downloads the remote note envelopes once.
 

@@ -60,6 +60,12 @@ Attachment bytes are served to the WebView through the restricted `bever:` resou
 - Sync lists remote metadata and transfers missing blobs on demand. It is intentionally explicit and synchronous within a native background task.
 - A content hash and dirty flag prevent unchanged notes from uploading on every sync.
 
+## Sync worker lifetime
+
+`src-tauri/src/sync_controller.rs` owns the one native worker claim, monotonically versioned progress, and terminal report. `src/store/useSyncStore.ts` mirrors that snapshot outside Settings and rejects stale query responses. `sync_platform.rs` adapts lifetime management without changing the reusable sync engine.
+
+On desktop, close-during-sync hides the main window to the tray; opening cancels the requested exit, while quitting waits for the same worker. On Android, a native `dataSync` foreground service maintains the existing process and reports notification progress. The maintained Kotlin, manifest, and drawable live in `src-tauri/android/app/src/main`; `scripts/sync-android-source.cjs` copies this small overlay into the ignored generated Tauri Android project during `npm run android:init`, `android:dev`, and `android:build`. Generated projects, native binaries, and icons remain outside source control.
+
 ## Future shells
 
 Linux and macOS can use the same Tauri/React shell. iOS will need platform-specific review of file picking, background execution, OAuth callback handling, and secure storage. These are not claimed as working targets until built and tested.

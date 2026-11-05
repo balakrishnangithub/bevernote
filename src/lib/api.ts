@@ -9,7 +9,7 @@ import type {
   NoteSummary,
   PCloudStatus,
   SaveNote,
-  SyncReport,
+  SyncStatus,
 } from '../types';
 import { browserApi } from './browserApi';
 
@@ -40,7 +40,8 @@ export interface BevernoteApi {
   openAttachment: (resourceId: string) => Promise<void>;
   saveAttachment: (resourceId: string, destination: string) => Promise<void>;
   setNotebookStack: (notebookId: string, stackId: string | null) => Promise<LibrarySnapshot>;
-  syncNow: () => Promise<SyncReport>;
+  syncNow: () => Promise<SyncStatus>;
+  syncStatus: () => Promise<SyncStatus>;
   pcloudStatus: () => Promise<PCloudStatus>;
   connectPcloud: () => Promise<PCloudStatus>;
   connectPcloudToken: (accessToken: string, hostname: string) => Promise<PCloudStatus>;
@@ -72,6 +73,7 @@ const tauriApi: BevernoteApi = {
   saveAttachment: (resourceId, destination) => invoke('save_attachment', { resourceId, destination }),
   setNotebookStack: (notebookId, stackId) => invoke('set_notebook_stack', { notebookId, stackId }),
   syncNow: () => invoke('sync_now'),
+  syncStatus: () => invoke('sync_status'),
   pcloudStatus: () => invoke('pcloud_status'),
   connectPcloud: () => invoke('connect_pcloud'),
   connectPcloudToken: (accessToken, hostname) => invoke('connect_pcloud_token', { accessToken, hostname }),

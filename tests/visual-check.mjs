@@ -228,6 +228,63 @@ try {
   expect(settingsBounds).not.toBeNull();
   expect(settingsBounds.x).toBeGreaterThanOrEqual(0);
   expect(settingsBounds.x + settingsBounds.width).toBeLessThanOrEqual(390);
+  expect(settingsBounds.y).toBeGreaterThanOrEqual(0);
+  expect(settingsBounds.y + settingsBounds.height).toBeLessThanOrEqual(844);
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  // Settings replaces the drawer entry, so Back cannot expose a hidden drawer.
+  await expect(page.locator('.sidebar.is-open')).toHaveCount(0);
+
+  // History Back unwinds the editor instead of closing the application.
+  await page.locator('.note-card').first().click();
+  await expect(page.locator('.app-shell')).toHaveClass(/mobile-has-note/);
+  await page.evaluate(() => window.history.back());
+  await expect(page.locator('.app-shell')).not.toHaveClass(/mobile-has-note/);
+  await expect(page.locator('.notes-panel')).toBeInViewport();
+  expect(await page.evaluate(() => document.querySelector('.app-shell') !== null)).toBe(true);
+
+  // Real Chromium touch events exercise horizontal edge gestures without
+  // claiming that browser emulation verifies a physical Android device.
+  const touch = await page.context().newCDPSession(page);
+  await touch.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 });
+  await touch.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: 4, y: 320 }],
+  });
+  await touch.send('Input.dispatchTouchEvent', {
+    type: 'touchMove',
+    touchPoints: [{ x: 100, y: 322 }],
+  });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await expect(page.locator('.sidebar.is-open')).toBeVisible();
+  await page.evaluate(() => window.history.back());
+  await expect(page.locator('.sidebar.is-open')).toHaveCount(0);
+  await touch.send('Input.dispatchTouchEvent', {
+    type: 'touchStart',
+    touchPoints: [{ x: 200, y: 320 }],
+  });
+  await touch.send('Input.dispatchTouchEvent', {
+    type: 'touchMove',
+    touchPoints: [{ x: 202, y: 410 }],
+  });
+  await touch.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+  await expect(page.locator('.sidebar.is-open')).toHaveCount(0);
+  await touch.send('Emulation.setTouchEmulationEnabled', { enabled: false });
+  const safeAreaCss = await page.locator('html').evaluate(() => {
+    for (const sheet of document.styleSheets) {
+      for (const rule of sheet.cssRules) {
+        if (rule instanceof CSSStyleRule && rule.selectorText === ':root') {
+          return rule.style.getPropertyValue('--safe-bottom');
+        }
+      }
+    }
+    return '';
+  });
+  expect(safeAreaCss).toContain('safe-area-inset-bottom');
+  expect(await page.locator('.app-shell').evaluate((element) => getComputedStyle(element).height)).toBe(
+    '844px',
+  );
+  expect(await page.locator('html').getAttribute('data-platform')).toBe('other');
+  await page.screenshot({ path: 'test-results/bevernote-mobile-touch.png', fullPage: true });
   if (errors.length) throw new Error(`Browser errors:\n${errors.join('\n')}`);
   console.log('Visual and interaction checks passed.');
 } finally {

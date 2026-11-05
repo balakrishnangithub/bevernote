@@ -208,7 +208,7 @@ pub struct ImportProgress {
     pub total_bytes: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SyncReport {
     pub pushed: u64,

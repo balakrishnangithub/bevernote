@@ -6,7 +6,7 @@ import type {
   NoteOrganizationAction,
   NoteSummary,
   SaveNote,
-  SyncReport,
+  SyncStatus,
 } from '../types';
 import type { BevernoteApi } from './api';
 
@@ -361,18 +361,26 @@ export const browserApi: BevernoteApi = {
   saveAttachment: demo(() => {
     throw new Error('Saving attachments requires the native Bevernote app.');
   }),
-  syncNow: demo((): SyncReport => ({
-    pushed: 0,
-    pulled: 0,
-    conflicts: 0,
-    blobsUploaded: 0,
-    blobsDownloaded: 0,
-    syncedAt: Date.now(),
-    durationMs: 0,
-    networkMs: 0,
-    remoteRequests: 0,
-    bytesUploaded: 0,
-    bytesDownloaded: 0,
+  syncNow: demo((): SyncStatus => {
+    throw new Error('pCloud connection requires the native Bevernote app.');
+  }),
+  syncStatus: demo((): SyncStatus => ({
+    revision: 0,
+    runId: 0,
+    running: false,
+    progress: {
+      phase: 'idle',
+      message: 'Synchronize when you are ready',
+      current: 0,
+      total: 0,
+      elapsedMs: 0,
+      networkMs: 0,
+      remoteRequests: 0,
+      bytesUploaded: 0,
+      bytesDownloaded: 0,
+    },
+    lastReport: null,
+    error: null,
   })),
   pcloudStatus: demo(() => ({
     connected: false,

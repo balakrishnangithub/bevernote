@@ -1,6 +1,6 @@
 {
   "name": "bevernote",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "private": true,
   "type": "module",
   "description": "A local-first, open-source note-taking application",
@@ -17,9 +17,9 @@
     "lint:core": "cargo clippy --workspace --all-targets -- -D warnings",
     "format": "prettier --write src tests docs/**/*.md .github/**/*.yml scripts/**/*.{js,cjs,mjs} *.{js,cjs,mjs,json,ts,md} && cargo fmt --all",
     "format:check": "prettier --check src tests docs/**/*.md .github/**/*.yml scripts/**/*.{js,cjs,mjs} *.{js,cjs,mjs,json,ts,md} && cargo fmt --all --check",
-    "android:init": "node scripts/tauri.cjs android init",
-    "android:dev": "node scripts/tauri.cjs android dev",
-    "android:build": "node scripts/tauri.cjs android build --apk"
+    "android:init": "node scripts/tauri.cjs android init && node scripts/sync-android-source.cjs",
+    "android:dev": "node scripts/sync-android-source.cjs && node scripts/tauri.cjs android dev",
+    "android:build": "node scripts/sync-android-source.cjs && node scripts/tauri.cjs android build --apk"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.14.26",

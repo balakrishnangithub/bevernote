@@ -183,6 +183,15 @@ export interface SyncProgress {
   bytesDownloaded: number;
 }
 
+export interface SyncStatus {
+  revision: number;
+  runId: number;
+  running: boolean;
+  progress: SyncProgress;
+  lastReport: SyncReport | null;
+  error: string | null;
+}
+
 export interface SyncReport {
   pushed: number;
   pulled: number;

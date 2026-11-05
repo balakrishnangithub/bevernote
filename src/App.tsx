@@ -1,16 +1,24 @@
 import { listen } from '@tauri-apps/api/event';
 import { Check, Cloud, CloudCheck, HardDrive, RefreshCw, ScanText, ShieldCheck, X } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { NoteList } from './components/NoteList';
 import { NoteWorkspace } from './components/NoteWorkspace';
 import { Sidebar } from './components/Sidebar';
 import { api, isNative } from './lib/api';
 import { formatBytes, formatDuration } from './lib/syncProgress';
+import { useDrawerGestures } from './lib/useDrawerGestures';
 import { useLibraryStore } from './store/useLibraryStore';
-import type { PCloudStatus, SyncProgress, SyncReport } from './types';
+import { useSyncStore } from './store/useSyncStore';
+import type { PCloudStatus } from './types';
 
 const isAndroid = isNative && /Android/i.test(navigator.userAgent);
+type AppLayer = 'sidebar' | 'editor' | 'settings';
+const isMobileLayout = () => window.matchMedia('(max-width: 760px)').matches;
+interface BevernoteHistoryState {
+  bevernote?: AppLayer;
+}
+const historyLayer = () => (window.history.state as BevernoteHistoryState | null)?.bevernote ?? null;
 
 export function App() {
   const { initialize, createNote, error, clearError, loading, selectedNote } = useLibraryStore();
@@ -18,10 +26,50 @@ export function App() {
   const [mobileEditor, setMobileEditor] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [theme, setTheme] = useState(() => localStorage.getItem('bevernote-theme') ?? 'light');
+  const syncStatus = useSyncStore((state) => state.status);
+  const syncStarting = useSyncStore((state) => state.starting);
+
+  const setLayer = useCallback((layer: AppLayer | null) => {
+    setSidebarOpen(layer === 'sidebar');
+    setMobileEditor(layer === 'editor');
+    setSettingsOpen(layer === 'settings');
+  }, []);
+  const openLayer = useCallback(
+    (layer: AppLayer) => {
+      if (isMobileLayout()) {
+        const state = { ...(window.history.state as BevernoteHistoryState | null), bevernote: layer };
+        const replaceDrawer = layer !== 'sidebar' && historyLayer() === 'sidebar';
+        if (historyLayer() !== layer) {
+          window.history[replaceDrawer ? 'replaceState' : 'pushState'](state, '');
+        }
+      }
+      setLayer(layer);
+    },
+    [setLayer],
+  );
+  const closeLayer = useCallback(
+    (layer: AppLayer) => {
+      if (isMobileLayout() && historyLayer() === layer) window.history.back();
+      else setLayer(null);
+    },
+    [setLayer],
+  );
 
   useEffect(() => {
+    const onHistory = (event: PopStateEvent) =>
+      setLayer((event.state as BevernoteHistoryState | null)?.bevernote ?? null);
+    window.addEventListener('popstate', onHistory);
+    return () => window.removeEventListener('popstate', onHistory);
+  }, [setLayer]);
+  useEffect(() => {
     void initialize();
+    void useSyncStore.getState().initialize();
   }, [initialize]);
+  useEffect(() => {
+    // Android applies native system-bar padding in MainActivity. Other shells
+    // use CSS safe-area insets; avoid applying both on Android.
+    document.documentElement.dataset.platform = isAndroid ? 'android' : 'other';
+  }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem('bevernote-theme', theme);
@@ -32,11 +80,11 @@ export function App() {
       const key = event.key.toLowerCase();
       if (modifier && key === 'n') {
         event.preventDefault();
-        void createNote().then(() => setMobileEditor(true));
+        void createNote().then(() => openLayer('editor'));
       }
       if (modifier && (key === 'k' || (key === 'f' && event.shiftKey))) {
         event.preventDefault();
-        setMobileEditor(false);
+        closeLayer('editor');
         document.querySelector<HTMLInputElement>('.search-wrap input')?.focus();
       }
       if (modifier && key === 'f' && !event.shiftKey && selectedNote) {
@@ -44,24 +92,42 @@ export function App() {
         window.dispatchEvent(new Event('bevernote:find'));
       }
       if (event.key === 'Escape') {
-        setSettingsOpen(false);
-        setSidebarOpen(false);
+        if (settingsOpen) closeLayer('settings');
+        else if (sidebarOpen) closeLayer('sidebar');
       }
     };
     window.addEventListener('keydown', handle);
     return () => window.removeEventListener('keydown', handle);
-  }, [createNote, selectedNote]);
+  }, [createNote, selectedNote, settingsOpen, sidebarOpen, closeLayer, openLayer]);
+
+  const gestures = useDrawerGestures({
+    open: sidebarOpen,
+    blocked: settingsOpen || (mobileEditor && Boolean(selectedNote)),
+    onOpen: () => openLayer('sidebar'),
+    onClose: () => closeLayer('sidebar'),
+  });
+  const syncActive = syncStarting || Boolean(syncStatus?.running);
 
   return (
-    <div className={`app-shell ${mobileEditor && selectedNote ? 'mobile-has-note' : ''}`}>
+    <div className={`app-shell ${mobileEditor && selectedNote ? 'mobile-has-note' : ''}`} {...gestures}>
       <Sidebar
         open={sidebarOpen}
-        onClose={() => setSidebarOpen(false)}
-        onOpenNote={() => setMobileEditor(true)}
-        onSettings={() => setSettingsOpen(true)}
+        onClose={() => closeLayer('sidebar')}
+        onOpenNote={() => openLayer('editor')}
+        onSettings={() => openLayer('settings')}
       />
-      <NoteList onOpenSidebar={() => setSidebarOpen(true)} onOpenNote={() => setMobileEditor(true)} />
-      <NoteWorkspace onBack={() => setMobileEditor(false)} />
+      <NoteList onOpenSidebar={() => openLayer('sidebar')} onOpenNote={() => openLayer('editor')} />
+      <NoteWorkspace onBack={() => closeLayer('editor')} />
+      {syncActive && (
+        <button
+          className="global-sync-indicator"
+          onClick={() => openLayer('settings')}
+          title="View sync progress"
+        >
+          <RefreshCw className="spin" />
+          <span>{syncStatus?.progress.message ?? 'Preparing synchronization…'}</span>
+        </button>
+      )}
       {loading && (
         <div className="loading-screen">
           <img className="brand-mark" src="/bevernote.svg" alt="" />
@@ -78,7 +144,7 @@ export function App() {
         </div>
       )}
       {settingsOpen && (
-        <SettingsDialog theme={theme} onTheme={setTheme} onClose={() => setSettingsOpen(false)} />
+        <SettingsDialog theme={theme} onTheme={setTheme} onClose={() => closeLayer('settings')} />
       )}
     </div>
   );
@@ -93,21 +159,28 @@ function SettingsDialog({
   onTheme: (theme: string) => void;
   onClose: () => void;
 }) {
-  const { refreshNotes, refreshSnapshot } = useLibraryStore();
+  const {
+    status: syncStatus,
+    starting: syncStarting,
+    receivedAt: progressReceivedAt,
+    error: syncError,
+    start: startSync,
+  } = useSyncStore();
   const [status, setStatus] = useState<PCloudStatus | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [report, setReport] = useState<SyncReport | null>(null);
-  const [syncProgress, setSyncProgress] = useState<SyncProgress | null>(null);
-  const [progressReceivedAt, setProgressReceivedAt] = useState(0);
-  const [now, setNow] = useState(0);
+  const [now, setNow] = useState(() => Date.now());
   const [oauthPending, setOauthPending] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [token, setToken] = useState('');
   const [hostname, setHostname] = useState('api.pcloud.com');
   const [ocrEnabled, setOcrEnabled] = useState(true);
+  const syncRunning = syncStarting || Boolean(syncStatus?.running);
+  const syncProgress = syncStatus?.progress ?? null;
+  const report = syncStatus?.lastReport ?? null;
 
   useEffect(() => {
+    void useSyncStore.getState().refresh();
     void api
       .pcloudStatus()
       .then((current) => {
@@ -139,12 +212,6 @@ function SettingsDialog({
         setOauthPending(false);
         setMessage(event.payload);
       }),
-      listen<SyncProgress>('bevernote:sync-progress', (event) => {
-        if (!active) return;
-        setSyncProgress(event.payload);
-        setProgressReceivedAt(Date.now());
-        setNow(Date.now());
-      }),
     ];
     return () => {
       active = false;
@@ -155,34 +222,23 @@ function SettingsDialog({
   }, []);
 
   useEffect(() => {
-    if (busy !== 'sync') return;
+    if (!syncRunning) return;
     const timer = window.setInterval(() => setNow(Date.now()), 500);
     return () => window.clearInterval(timer);
-  }, [busy]);
+  }, [syncRunning]);
 
-  const run = async (action: string, operation: () => Promise<PCloudStatus | SyncReport>) => {
+  const run = async (action: string, operation: () => Promise<PCloudStatus>) => {
     setBusy(action);
     setMessage(null);
-    setReport(null);
-    if (action === 'sync') {
-      setSyncProgress(null);
-      setNow(Date.now());
-    }
     if (action === 'connect' && isAndroid) setOauthPending(true);
     try {
       const result = await operation();
-      if ('connected' in result) {
-        setStatus(result);
-        setOauthPending(result.authorizationPending);
-        setToken('');
-        setManualOpen(false);
-        if (action === 'connect' && isAndroid && result.authorizationPending) {
-          setMessage('Approve pCloud in your browser. Android will return to Bevernote automatically.');
-        }
-      } else {
-        setReport(result);
-        setStatus(await api.pcloudStatus());
-        await Promise.all([refreshNotes(), refreshSnapshot()]);
+      setStatus(result);
+      setOauthPending(result.authorizationPending);
+      setToken('');
+      setManualOpen(false);
+      if (action === 'connect' && isAndroid && result.authorizationPending) {
+        setMessage('Approve pCloud in your browser. Android will return to Bevernote automatically.');
       }
     } catch (error) {
       if (action === 'connect') setOauthPending(false);
@@ -193,7 +249,7 @@ function SettingsDialog({
   };
 
   const elapsedMs = syncProgress
-    ? syncProgress.elapsedMs + (busy === 'sync' ? Math.max(0, now - progressReceivedAt) : 0)
+    ? syncProgress.elapsedMs + (syncRunning ? Math.max(0, now - progressReceivedAt) : 0)
     : 0;
 
   return (
@@ -286,23 +342,29 @@ function SettingsDialog({
               <div className="settings-buttons sync-primary-actions">
                 <button
                   className="primary-action"
-                  disabled={!isNative || !status?.connected || busy !== null}
+                  disabled={!isNative || !status?.connected || busy !== null || syncRunning}
                   title={status?.connected ? 'Synchronize with pCloud now' : 'Connect pCloud to enable sync'}
-                  onClick={() => void run('sync', api.syncNow)}
+                  onClick={() => void startSync()}
                 >
-                  <RefreshCw className={busy === 'sync' ? 'spin' : ''} />
-                  {busy === 'sync' ? 'Synchronizing…' : 'Sync now'}
+                  <RefreshCw className={syncRunning ? 'spin' : ''} />
+                  {syncRunning ? 'Synchronizing…' : 'Sync now'}
                 </button>
                 {status?.connected && (
                   <button
                     className="secondary-action"
-                    disabled={busy !== null}
+                    disabled={busy !== null || syncRunning}
                     onClick={() => void run('disconnect', api.disconnectPcloud)}
                   >
                     Disconnect
                   </button>
                 )}
               </div>
+              <span className="settings-pending">
+                One sync runs at a time. Progress remains available after closing Settings. On Windows,
+                closing the window keeps the current sync in the tray; on Android, the foreground service
+                shows a notification when permission allows. Force-stop, reboot, or OS process termination can
+                interrupt background completion.
+              </span>
               {status?.connected ? (
                 <>
                   <span className="setting-ok">
@@ -324,12 +386,7 @@ function SettingsDialog({
                         Set <strong>Allow implicit grant</strong> to <strong>Allow</strong>, then click{' '}
                         <strong>Save changes</strong>.
                       </li>
-                      {isAndroid ? (
-                        <li>
-                          Add <code>bevernote://oauth/pcloud</code> to <strong>Redirect URIs</strong> and save
-                          changes. Keep the existing desktop redirect as well.
-                        </li>
-                      ) : (
+                      {!isAndroid && (
                         <li>
                           Keep the redirect URI exactly <code>http://127.0.0.1:53682/</code>.
                         </li>
@@ -404,7 +461,7 @@ function SettingsDialog({
               {!isNative && (
                 <span className="settings-pending">pCloud connection is available in the native app.</span>
               )}
-              {busy === 'sync' && (
+              {syncRunning && (
                 <div className="sync-progress" role="status" aria-live="polite">
                   <strong>{syncProgress?.message ?? 'Preparing synchronization…'}</strong>
                   {syncProgress && (
@@ -428,6 +485,16 @@ function SettingsDialog({
                     </>
                   )}
                 </div>
+              )}
+              {syncError && (
+                <p className="sync-message error" role="alert">
+                  {syncError}
+                </p>
+              )}
+              {syncStatus?.error && !syncError && (
+                <p className="sync-message error" role="alert">
+                  {syncStatus.error}
+                </p>
               )}
               {message && (
                 <p

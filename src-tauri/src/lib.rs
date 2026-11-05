@@ -1,14 +1,18 @@
 #[cfg(target_os = "android")]
 mod android_oauth;
 mod credentials;
+mod sync_controller;
+mod sync_platform;
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+use std::sync::atomic::Ordering;
 #[cfg(not(target_os = "android"))]
 use std::time::Duration;
 use std::{
     fs::File,
     io::{BufReader, BufWriter, Write},
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 #[cfg(not(target_os = "android"))]
@@ -26,12 +30,68 @@ use bevernote_core::{
 };
 use credentials::{delete_access_token, read_access_token, save_access_token};
 use serde::Serialize;
+use sync_controller::{SyncController, SyncStatus};
+use sync_platform::SyncPlatform;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use url::Url;
 
 pub(crate) struct AppState {
     pub(crate) library: Arc<Library>,
+    pub(crate) sync: Arc<SyncController>,
+    pub(crate) platform: Arc<SyncPlatform>,
+    /// Set only when a desktop close/quit request should happen after the
+    /// existing worker finishes. Opening the window clears it.
+    #[cfg_attr(any(target_os = "android", target_os = "ios"), allow(dead_code))]
+    pub(crate) exit_after_sync: AtomicBool,
+}
+
+fn publish_sync_status(app: &AppHandle, status: &SyncStatus) {
+    let _ = app.emit("bevernote:sync-status", status);
+}
+
+fn finish_sync_run(app: &AppHandle, run_id: u64, result: Result<SyncReport, String>) {
+    let state = app.state::<AppState>();
+    let Some(status) = state.sync.finish(run_id, result) else {
+        return;
+    };
+    publish_sync_status(app, &status);
+    let message = if status.error.is_some() {
+        format!(
+            "Sync failed: {}",
+            status.error.as_deref().unwrap_or("unknown error")
+        )
+    } else {
+        "Synchronization complete".to_owned()
+    };
+    state.platform.finish(&message);
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    if state.exit_after_sync.load(Ordering::Acquire) {
+        let app = app.clone();
+        let _ = app.clone().run_on_main_thread(move || {
+            // Recheck on the UI thread: Open Bevernote may have cancelled exit
+            // after the worker completed but before this callback ran.
+            if app
+                .state::<AppState>()
+                .exit_after_sync
+                .load(Ordering::Acquire)
+            {
+                app.exit(0);
+            }
+        });
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn restore_main_window(app: &AppHandle) {
+    app.state::<AppState>()
+        .exit_after_sync
+        .store(false, Ordering::Release);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
 }
 
 #[derive(Serialize)]
@@ -365,17 +425,57 @@ fn save_attachment(
 }
 
 #[tauri::command]
-async fn sync_now(app: AppHandle, state: State<'_, AppState>) -> Result<SyncReport, String> {
+fn sync_status(state: State<'_, AppState>) -> SyncStatus {
+    state.sync.status()
+}
+
+#[tauri::command]
+async fn sync_now(app: AppHandle, state: State<'_, AppState>) -> Result<SyncStatus, String> {
+    // Avoid touching the credential vault for duplicate clicks. Two callers
+    // that both pass validation are still serialized by prepare().
+    if !state.sync.is_running() {
+        let library = Arc::clone(&state.library);
+        tauri::async_runtime::spawn_blocking(move || load_credentials(&library))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(string_error)?;
+    }
+
+    let preparation = state.sync.prepare();
+    if !preparation.should_start {
+        return Ok(state.sync.status());
+    }
+    let run_id = preparation.run_id;
+    publish_sync_status(&app, &state.sync.status());
+    debug_assert!(state.sync.claim_worker(run_id));
+
+    let platform = Arc::clone(&state.platform);
+    if let Err(error) = tauri::async_runtime::spawn_blocking(move || platform.start())
+        .await
+        .map_err(|error| error.to_string())
+        .and_then(string_error)
+    {
+        finish_sync_run(&app, run_id, Err(error));
+        return Ok(state.sync.status());
+    }
+
     let library = Arc::clone(&state.library);
+    let worker_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let credentials = load_credentials(&library)?;
-        sync_with_pcloud_progress(&library, credentials, |progress: SyncProgress| {
-            let _ = app.emit("bevernote:sync-progress", progress);
-        })
-    })
-    .await
-    .map_err(|error| error.to_string())
-    .and_then(string_error)
+        let credentials = load_credentials(&library).map_err(|error| error.to_string());
+        let result = credentials.and_then(|credentials| {
+            sync_with_pcloud_progress(&library, credentials, |progress: SyncProgress| {
+                let state = worker_app.state::<AppState>();
+                state.platform.progress(&progress);
+                if let Some(status) = state.sync.update(run_id, progress) {
+                    publish_sync_status(&worker_app, &status);
+                }
+            })
+            .map_err(|error| error.to_string())
+        });
+        finish_sync_run(&worker_app, run_id, result);
+    });
+    Ok(state.sync.status())
 }
 
 #[tauri::command]
@@ -656,13 +756,25 @@ fn parse_loopback_credentials(
     Ok(credentials)
 }
 
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn should_defer_close(label: &str, sync_running: bool) -> bool {
+    label == "main" && sync_running
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init());
     #[cfg(target_os = "android")]
-    let builder = builder.plugin(tauri_plugin_deep_link::init());
+    let builder = builder.plugin(tauri_plugin_deep_link::init()).plugin(
+        tauri::plugin::Builder::new("bevernote-sync")
+            .setup(|app, api| {
+                app.manage(Arc::new(SyncPlatform::register::<()>(api)?));
+                Ok(())
+            })
+            .build(),
+    );
 
     builder
         .register_uri_scheme_protocol("bever", |context, request| {
@@ -701,10 +813,68 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let library = Arc::new(Library::open(data_dir)?);
-            app.manage(AppState { library });
+            #[cfg(target_os = "android")]
+            let platform = Arc::clone(&*app.state::<Arc<SyncPlatform>>());
+            #[cfg(not(target_os = "android"))]
+            let platform = Arc::new(SyncPlatform);
+            app.manage(AppState {
+                library,
+                sync: Arc::new(SyncController::default()),
+                platform,
+                exit_after_sync: AtomicBool::new(false),
+            });
             #[cfg(target_os = "android")]
             android_oauth::register(app)?;
+
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
+                use tauri::{
+                    menu::{Menu, MenuItem},
+                    tray::TrayIconBuilder,
+                };
+                let open = MenuItem::with_id(app, "open", "Open Bevernote", true, None::<&str>)?;
+                let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+                let menu = Menu::with_items(app, &[&open, &quit])?;
+                TrayIconBuilder::with_id("main-tray")
+                    .icon(
+                        app.default_window_icon()
+                            .expect("Bevernote window icon")
+                            .clone(),
+                    )
+                    .menu(&menu)
+                    .tooltip("Bevernote")
+                    .on_menu_event(|app, event| match event.id.as_ref() {
+                        "open" => restore_main_window(app),
+                        "quit" => {
+                            if app.state::<AppState>().sync.is_running() {
+                                app.state::<AppState>()
+                                    .exit_after_sync
+                                    .store(true, Ordering::Release);
+                                if let Some(window) = app.get_webview_window("main") {
+                                    let _ = window.hide();
+                                }
+                            } else {
+                                app.exit(0);
+                            }
+                        }
+                        _ => {}
+                    })
+                    .build(app)?;
+            }
             Ok(())
+        })
+        .on_window_event(|_window, _event| {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            if let tauri::WindowEvent::CloseRequested { api, .. } = _event {
+                let app = _window.app_handle();
+                if should_defer_close(_window.label(), app.state::<AppState>().sync.is_running()) {
+                    api.prevent_close();
+                    app.state::<AppState>()
+                        .exit_after_sync
+                        .store(true, Ordering::Release);
+                    let _ = _window.hide();
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             bootstrap,
@@ -729,6 +899,7 @@ pub fn run() {
             open_attachment,
             save_attachment,
             sync_now,
+            sync_status,
             pcloud_status,
             connect_pcloud,
             connect_pcloud_token,
@@ -744,8 +915,15 @@ mod tests {
 
     use super::{
         parse_loopback_credentials, pcloud_authorization_url, pcloud_callback_parameters,
-        safe_attachment_name,
+        safe_attachment_name, should_defer_close,
     };
+
+    #[test]
+    fn desktop_close_waits_only_for_the_active_sync_worker() {
+        assert!(should_defer_close("main", true));
+        assert!(!should_defer_close("main", false));
+        assert!(!should_defer_close("secondary", true));
+    }
 
     fn callback_parameters() -> HashMap<String, String> {
         HashMap::from([
